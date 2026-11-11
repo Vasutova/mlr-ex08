@@ -76,13 +76,24 @@
     display: grid;
     place-items: center;
   }
-  .stage > video, .stage > img {
+  .stage > video {
     width: 100%;
     height: 100%;
     object-fit: cover;   /* square box + cover == the central square of the frame */
     display: block;
   }
-  .stage img { object-fit: contain; background: #000; }
+  /* An uploaded photo fills the stage's width, keeps its own aspect ratio and
+     is never cropped or stretched; object-fit: contain letterboxes the rare
+     very tall image instead of distorting it. */
+  #photo {
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    background: #000;
+    display: block;
+  }
   .hint {
     position: absolute;
     inset: auto 0 0 0;
@@ -688,8 +699,8 @@ async function startCamera() {
       return;
     }
   }
-  photoEl.hidden = true;
-  video.hidden = false;
+  photoEl.hidden = true;   photoEl.style.display = "none";
+  video.hidden = false;    video.style.display = "block";   // undo what an upload did to it
   video.srcObject = stream;
   try { await video.play(); } catch (e) { /* some browsers need a second tap — the Start button doubles as play */ }
   $("startBtn").hidden = true;
@@ -716,9 +727,7 @@ function tick() {
   if (!looping) return;
   if (!busy && session && video.videoWidth > 0 && video.readyState >= 2) {
     busy = true;
-    var t0 = performance.now();
-    runModel(toTensor(video, video.videoWidth, video.videoHeight))
-      .then(function (probs) { render(probs, performance.now() - t0); })
+    runInference(video)
       .catch(function (e) { stopCamera(); setStatus("Inference failed: " + e.message, true); })
       .then(function () { busy = false; });
   }
@@ -726,9 +735,8 @@ function tick() {
 }
 
 /* ---------- photo fallback ---------- */
-var previewURL = null;
 
-/** Decodes a File/Blob to an ImageBitmap, or an <img> whose src the caller owns. */
+/** Decodes a Blob (used by the built-in check) to an ImageBitmap, or an <img>. */
 async function decodeFile(file) {
   if (window.createImageBitmap) {
     try { return await createImageBitmap(file); } catch (e) { /* fall through to <img> */ }
@@ -739,26 +747,66 @@ async function decodeFile(file) {
   return img;
 }
 
-async function handleFile(file) {
+/** Intrinsic pixel size of any drawable: <video>, <img>, ImageBitmap or canvas. */
+function dims(src) {
+  return [src.videoWidth || src.naturalWidth || src.width,
+          src.videoHeight || src.naturalHeight || src.height];
+}
+
+/**
+ * Centre crop -> 96x96 -> normalise -> inference -> on-screen probabilities.
+ * Used for camera frames and for uploaded photos alike, so both take exactly
+ * the same path to the model.
+ */
+async function runInference(src, name) {
+  await modelReady;
+  var wh = dims(src), w = wh[0], h = wh[1];
+  var t0 = performance.now();
+  var probs = await runModel(toTensor(src, w, h));
+  render(probs, performance.now() - t0);
+  if (name) {
+    setStatus(name + " · " + w + "×" + h + " px, centre " + Math.min(w, h) + "×" + Math.min(w, h) +
+      " square classified.");
+  }
+  return probs;
+}
+
+/**
+ * Shows the picked photo and classifies it.
+ *
+ * The file is read with FileReader into a data: URL and that string is used for
+ * both the preview and the inference image. Data URLs are used deliberately:
+ * blob: URLs from a photo picker are unreliable on iOS Safari (the <img> then
+ * stays a broken-image icon over a black stage) and need revoking, whereas a
+ * data URL renders in every browser and dies with the element.
+ */
+function readPhoto(file) {
   stopCamera();
   setStatus("Reading " + file.name + "…");
-  try {
-    await modelReady;
-    var src = await decodeFile(file);
-    var w = src.width, h = src.height;
-    photoEl.hidden = false;
-    video.hidden = true;
-    // one managed preview URL, revoked only when the next photo replaces it
-    if (previewURL) URL.revokeObjectURL(previewURL);
-    previewURL = (src instanceof Image) ? src.src : URL.createObjectURL(file);
-    photoEl.src = previewURL;
-    var t0 = performance.now();
-    render(await runModel(toTensor(src, w, h)), performance.now() - t0);
-    setStatus(file.name + " · " + w + "×" + h + " px, centre " + Math.min(w, h) + "×" + Math.min(w, h) + " square classified.");
-    setHint("the centre square of the photo is what gets classified");
-  } catch (e) {
-    setStatus("Could not read that image (" + e.message + "). Try a JPEG or PNG.", true);
-  }
+  var reader = new FileReader();
+  reader.onerror = function () {
+    setStatus("Could not read " + file.name + " from the device.", true);
+  };
+  reader.onload = function (evt) {
+    var dataURL = evt.target.result;
+    var img = new Image();
+    img.onload = function () {
+      photoEl.src = dataURL;
+      photoEl.hidden = false;
+      photoEl.style.display = "block";
+      video.hidden = true;
+      video.style.display = "none";
+      setHint("the centre square of the photo is what gets classified");
+      runInference(img, file.name).catch(function (e) {
+        setStatus("Could not classify " + file.name + " (" + e.message + ").", true);
+      });
+    };
+    img.onerror = function () {
+      setStatus(file.name + " is not a picture this browser can decode — try a JPEG or PNG.", true);
+    };
+    img.src = dataURL;
+  };
+  reader.readAsDataURL(file);
 }
 
 /* ---------- built-in check against check_expected.json ---------- */
@@ -812,7 +860,7 @@ function renderQR() {
 $("startBtn").addEventListener("click", startCamera);
 $("stopBtn").addEventListener("click", function () { stopCamera(); setStatus("Camera stopped."); });
 $("flipBtn").addEventListener("click", function () { facing = facing === "environment" ? "user" : "environment"; startCamera(); });
-$("file").addEventListener("change", function (e) { if (e.target.files[0]) handleFile(e.target.files[0]); });
+$("file").addEventListener("change", function (e) { if (e.target.files[0]) readPhoto(e.target.files[0]); });
 $("checkBtn").addEventListener("click", runCheck);
 
 renderQR();
