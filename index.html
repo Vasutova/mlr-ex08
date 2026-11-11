@@ -31,6 +31,9 @@
     }
   }
   * { box-sizing: border-box; }
+  /* rules like `.stage > img { display:block }` would otherwise out-specify the
+     browser's own [hidden] rule and leave a hidden element on screen */
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     background: var(--bg);
@@ -125,14 +128,17 @@
   .bad { color: var(--warn); font-weight: 600; }
 
   /* --- QR --- */
-  .qrRow { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .qrRow { display: flex; gap: 14px; align-items: flex-start; }
+  .qrFig { margin: 0; flex: 0 0 auto; text-align: center; }
+  .qrFig figcaption { font-size: .76rem; color: var(--muted); margin-top: 5px; }
+  .qrText { flex: 1 1 0; min-width: 0; }
   #qr {
-    width: 168px; height: 168px; image-rendering: pixelated;
+    width: 160px; height: 160px; image-rendering: pixelated;
     background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 4px;
-    flex: 0 0 auto;
   }
-  .qrRow a { color: var(--accent); font-weight: 600; word-break: break-all; }
-  .qrRow p { margin: 0 0 6px; }
+  .qrText a { color: var(--accent); font-weight: 600; word-break: break-all; }
+  .qrText p { margin: 0 0 6px; }
+  @media (max-width: 359px) { .qrRow { flex-wrap: wrap; } }
   footer { color: var(--muted); font-size: .78rem; text-align: center; }
 </style>
 </head>
@@ -177,12 +183,15 @@
   <section class="card">
     <h2>Open this page on your phone</h2>
     <div class="qrRow">
-      <canvas id="qr" width="21" height="21" role="img" aria-label="QR code that opens this page"></canvas>
-      <div>
+      <figure class="qrFig">
+        <canvas id="qr" width="21" height="21" role="img" aria-label="QR code that opens this page"></canvas>
+        <figcaption><strong>Scan to open this page</strong></figcaption>
+      </figure>
+      <div class="qrText">
         <p>Point your phone camera at the code — it opens this page on any phone:</p>
         <p><a id="qrLink" href="/">this page</a></p>
-        <p class="fineprint">Label: <strong>Scan to open this page</strong>. The code is drawn by
-          <code>index.html</code> itself (error level M, byte mode) — no QR web service is called.</p>
+        <p class="fineprint">Drawn by <code>index.html</code> itself (QR model 2, byte mode, error
+          level M) — no QR web service is called.</p>
         <p class="fineprint" id="qrMatch"></p>
       </div>
     </div>
@@ -633,11 +642,12 @@ var barEls = {};
   });
 })();
 
+/** Always in percent, so the four rows are directly comparable. */
 function fmtProb(p) {
   if (p >= 0.01) return (p * 100).toFixed(1) + "%";
   if (p >= 0.0001) return (p * 100).toFixed(3) + "%";
   if (p === 0) return "0%";
-  return p.toExponential(1);
+  return (p * 100).toExponential(1) + "%";
 }
 function render(probs, ms) {
   var order = CFG.classes.map(function (c, i) { return [c, probs[i]]; })
@@ -717,19 +727,15 @@ function tick() {
 /* ---------- photo fallback ---------- */
 var previewURL = null;
 
+/** Decodes a File/Blob to an ImageBitmap, or an <img> whose src the caller owns. */
 async function decodeFile(file) {
   if (window.createImageBitmap) {
     try { return await createImageBitmap(file); } catch (e) { /* fall through to <img> */ }
   }
-  var url = URL.createObjectURL(file);
-  try {
-    var img = new Image();
-    img.src = url;
-    await (img.decode ? img.decode() : new Promise(function (res, rej) {
-      img.onload = res; img.onerror = rej;
-    }));
-    return img;
-  } finally { setTimeout(function () { URL.revokeObjectURL(url); }, 30000); }
+  var img = new Image();
+  img.src = URL.createObjectURL(file);
+  await new Promise(function (res, rej) { img.onload = res; img.onerror = rej; });
+  return img;
 }
 
 async function handleFile(file) {
@@ -741,12 +747,10 @@ async function handleFile(file) {
     var w = src.width, h = src.height;
     photoEl.hidden = false;
     video.hidden = true;
-    if (src instanceof Image) photoEl.src = src.src;
-    else {
-      if (previewURL) URL.revokeObjectURL(previewURL);
-      previewURL = URL.createObjectURL(file);
-      photoEl.src = previewURL;
-    }
+    // one managed preview URL, revoked only when the next photo replaces it
+    if (previewURL) URL.revokeObjectURL(previewURL);
+    previewURL = (src instanceof Image) ? src.src : URL.createObjectURL(file);
+    photoEl.src = previewURL;
     var t0 = performance.now();
     render(await runModel(toTensor(src, w, h)), performance.now() - t0);
     setStatus(file.name + " · " + w + "×" + h + " px, centre " + Math.min(w, h) + "×" + Math.min(w, h) + " square classified.");
@@ -765,6 +769,8 @@ async function runCheck() {
     var src = await decodeFile(blob);
     var probs = await runModel(toTensor(src, src.width, src.height));
     var expected = await (await fetch("check_expected.json")).json();
+    render(probs);                       // show them in the bars, not only in the log line
+    setHint("result of the built-in check image");
     var worst = 0, lines = [];
     CFG.classes.forEach(function (c, i) {
       var d = Math.abs(probs[i] - expected[c]);
