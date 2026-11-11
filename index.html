@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Leaf classifier running live from the phone camera, entirely in the browser with ONNX Runtime Web.">
+<meta name="theme-color" content="#0f1712">
+<meta name="leaf-autotest" content="">
+<title>Leaf classifier · live camera</title>
+<style>
+  :root {
+    --bg: #f6f7f4;
+    --card: #ffffff;
+    --ink: #17211b;
+    --muted: #61705f;
+    --line: #dfe4dc;
+    --accent: #2f7d4f;
+    --accent-soft: #e4f1e7;
+    --warn: #9a5b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1712;
+      --card: #17211b;
+      --ink: #eaf0e9;
+      --muted: #97a89a;
+      --line: #2a3830;
+      --accent: #6fcf97;
+      --accent-soft: #1e3327;
+      --warn: #f0b959;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  main {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 16px 16px calc(40px + env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  header h1 { font-size: 1.45rem; margin: 6px 0 2px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); font-size: 0.88rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px;
+  }
+  .card > h2 {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+
+  /* --- camera / photo stage: a square, so what you see is the classified crop --- */
+  .stage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+  }
+  .stage > video, .stage > img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;   /* square box + cover == the central square of the frame */
+    display: block;
+  }
+  .stage img { object-fit: contain; background: #000; }
+  .hint {
+    position: absolute;
+    inset: auto 0 0 0;
+    padding: 8px 10px;
+    background: linear-gradient(transparent, rgba(0,0,0,.72));
+    color: #fff;
+    font-size: 0.8rem;
+    text-align: center;
+  }
+  .hint:empty { display: none; }
+
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  button {
+    font: inherit;
+    font-weight: 600;
+    padding: 11px 15px;
+    border-radius: 10px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    min-height: 44px;
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type="file"] { font: inherit; color: inherit; max-width: 100%; }
+  .status { margin: 12px 0 0; font-size: 0.86rem; color: var(--muted); min-height: 1.3em; }
+  .status.error { color: var(--warn); }
+
+  /* --- results --- */
+  .top1 { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
+  .top1 .name { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.02em; }
+  .top1 .val { font-size: 1.05rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  ul.bars { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  ul.bars li { display: grid; grid-template-columns: 5.2rem 1fr 4.6rem; align-items: center; gap: 8px; font-size: 0.92rem; }
+  ul.bars .label { color: var(--muted); }
+  ul.bars .track { background: var(--accent-soft); border-radius: 999px; height: 10px; overflow: hidden; }
+  ul.bars .fill { background: var(--accent); height: 100%; width: 0%; border-radius: 999px; transition: width .12s linear; }
+  ul.bars .pct { text-align: right; font-variant-numeric: tabular-nums; }
+  .fineprint { font-size: .8rem; color: var(--muted); margin: 12px 0 0; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .82em; word-break: break-all; }
+  .ok { color: var(--accent); font-weight: 600; }
+  .bad { color: var(--warn); font-weight: 600; }
+
+  /* --- QR --- */
+  .qrRow { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  #qr {
+    width: 168px; height: 168px; image-rendering: pixelated;
+    background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 4px;
+    flex: 0 0 auto;
+  }
+  .qrRow a { color: var(--accent); font-weight: 600; word-break: break-all; }
+  .qrRow p { margin: 0 0 6px; }
+  footer { color: var(--muted); font-size: .78rem; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>🍃 Leaf classifier</h1>
+    <p>Live camera classification, 100% on your device · ONNX Runtime Web + <code>leaf_model.onnx</code></p>
+  </header>
+
+  <section class="card">
+    <h2>Camera</h2>
+    <div class="stage">
+      <!-- playsinline is mandatory for iOS Safari: without it the video jumps into a fullscreen player -->
+      <video id="video" playsinline muted autoplay></video>
+      <img id="photo" alt="Preview of the photo you selected" hidden>
+      <p class="hint" id="hint"></p>
+    </div>
+    <div class="row">
+      <button id="startBtn">▶ Start camera</button>
+      <button id="stopBtn" class="secondary" hidden>■ Stop</button>
+      <button id="flipBtn" class="secondary" hidden>⇄ Flip camera</button>
+    </div>
+    <div class="row">
+      <label for="file"><strong>or upload a photo</strong> (fallback — no camera needed)</label>
+      <input id="file" type="file" accept="image/*">
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Loading the model…</p>
+  </section>
+
+  <section class="card">
+    <h2>Probability per class</h2>
+    <div class="top1"><span class="name" id="topName">—</span><span class="val" id="topVal"></span></div>
+    <ul class="bars" id="bars"></ul>
+    <p class="fineprint" id="perf"></p>
+    <div class="row">
+      <button id="checkBtn" class="secondary">Run the built-in check (check_image.jpg)</button>
+    </div>
+    <p class="fineprint" id="checkResult" role="status"></p>
+  </section>
+
+  <section class="card">
+    <h2>Open this page on your phone</h2>
+    <div class="qrRow">
+      <canvas id="qr" width="21" height="21" role="img" aria-label="QR code that opens this page"></canvas>
+      <div>
+        <p>Point your phone camera at the code — it opens this page on any phone:</p>
+        <p><a id="qrLink" href="/">this page</a></p>
+        <p class="fineprint">Label: <strong>Scan to open this page</strong>. The code is drawn by
+          <code>index.html</code> itself (error level M, byte mode) — no QR web service is called.</p>
+        <p class="fineprint" id="qrMatch"></p>
+      </div>
+    </div>
+  </section>
+
+  <footer>Input 1×3×96×96 · central-square crop · RGB ÷ 255 · mean/std standardisation · softmax over model logits.</footer>
+</main>
+
+<!-- ==================================================================
+     ONNX Runtime Web from a CDN (pinned to the same release as the
+     reference runtime). UMD build -> global `ort`.
+     ================================================================== -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.min.js"></script>
+
+<!-- ==================================================================
+     Preprocessing, exactly as described by model_info.json:
+     central square crop -> resize to input_size -> /255 -> (x-mean)/std
+     -> planar CHW float32 tensor of shape 1×3×size×size.
+     ================================================================== -->
+<script id="preprocess-impl">
+"use strict";
+var CFG = {
+  model: "leaf_model.onnx",
+  inputName: "image",
+  classes: ["apple", "cherry", "chestnut", "maple"],
+  size: 96,
+  mean: [0.485, 0.456, 0.406],
+  std: [0.229, 0.224, 0.225]
+};
+
+var _target = null, _pool = [null, null], _poolIdx = 0;
+
+function _canvas(side) {
+  var c = document.createElement("canvas");
+  c.width = side; c.height = side;
+  return c;
+}
+
+/**
+ * Ping-pongs between two scratch canvases so a step never draws into the very
+ * canvas it is reading from (resizing a canvas also clears it, which would
+ * blank the source mid-chain).
+ */
+function _scratch(side) {
+  _poolIdx = 1 - _poolIdx;
+  if (!_pool[_poolIdx]) _pool[_poolIdx] = _canvas(side);
+  if (_pool[_poolIdx].width !== side) { _pool[_poolIdx].width = side; _pool[_poolIdx].height = side; }
+  return _pool[_poolIdx];
+}
+
+/**
+ * Turns any drawable (HTMLVideoElement, HTMLImageElement, HTMLCanvasElement,
+ * ImageBitmap) into the model input tensor.
+ *
+ * The source is first reduced by halving when it is much larger than the
+ * target: a single drawImage downscale of e.g. 3000px -> 96px drops detail
+ * badly in some mobile browsers, and halving keeps the crop faithful.
+ */
+function toTensor(src, srcW, srcH) {
+  var S = CFG.size;
+  if (!_target) _target = _canvas(S);
+
+  var n = Math.min(srcW, srcH);            // side of the central square
+  var x = Math.floor((srcW - n) / 2);
+  var y = Math.floor((srcH - n) / 2);
+  var el = src;
+
+  while (n > S * 4) {
+    var half = Math.max(S * 2, Math.floor(n / 2));
+    var bc = _scratch(half).getContext("2d");
+    bc.imageSmoothingEnabled = true;
+    bc.imageSmoothingQuality = "high";
+    bc.drawImage(el, x, y, n, n, 0, 0, half, half);
+    el = bc.canvas; x = 0; y = 0; n = half;
+  }
+
+  if (_target.width !== S) { _target.width = S; _target.height = S; }
+  var ctx = _target.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.clearRect(0, 0, S, S);
+  ctx.drawImage(el, x, y, n, n, 0, 0, S, S);
+
+  var px = ctx.getImageData(0, 0, S, S).data;   // RGBA, 0–255
+  var area = S * S;
+  var out = new Float32Array(3 * area);
+  var mR = CFG.mean[0], mG = CFG.mean[1], mB = CFG.mean[2];
+  var sR = CFG.std[0],  sG = CFG.std[1],  sB = CFG.std[2];
+  for (var i = 0, r4 = 0; i < area; i++, r4 += 4) {
+    out[i]            = (px[r4]     / 255 - mR) / sR;   // plane R
+    out[area + i]     = (px[r4 + 1] / 255 - mG) / sG;   // plane G
+    out[2 * area + i] = (px[r4 + 2] / 255 - mB) / sB;   // plane B
+  }
+  return out;   // CHW, row-major — the layout a [1,3,S,S] float32 tensor wants
+}
+
+/** Numerically stable softmax: the model head is named "logits". */
+function softmax(logits) {
+  var n = logits.length, m = -Infinity, i, s = 0, p = new Array(n);
+  for (i = 0; i < n; i++) if (logits[i] > m) m = logits[i];
+  for (i = 0; i < n; i++) { p[i] = Math.exp(logits[i] - m); s += p[i]; }
+  for (i = 0; i < n; i++) p[i] /= s;
+  return p;
+}
+</script>
+
+<!-- ==================================================================
+     QR code encoder — Model 2, byte mode, error level M, versions 1–10.
+     Written out here on purpose: the code must be produced by the page
+     itself, not fetched from an external QR-image service.
+     ================================================================== -->
+<script id="qr-impl">
+"use strict";
+var QRCode = (function () {
+  // ---- ISO/IEC 18004 tables, error-correction level M ------------------
+  // [EC codewords per block, blocks1, dataCW1, blocks2?, dataCW2?]
+  var SPEC = [
+    null,
+    [10, 1, 16], [16, 1, 28], [26, 1, 44], [18, 2, 32], [24, 2, 43],
+    [16, 4, 27], [18, 4, 31], [22, 2, 38, 2, 39], [22, 3, 36, 2, 37],
+    [26, 4, 43, 1, 44]
+  ];
+  var ALIGN = [[], [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34],
+               [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50]];
+  var G15 = 0x537, G18 = 0x1F25, G15_MASK = 0x5412, EC_M_BITS = 0x00;
+
+  // ---- GF(256), primitive polynomial 0x11D ------------------------------
+  var EXP = new Array(512), LOG = new Array(256);
+  (function () {
+    var x = 1;
+    for (var i = 0; i < 255; i++) { EXP[i] = x; LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11D; }
+    for (var j = 255; j < 512; j++) EXP[j] = EXP[j - 255];
+  })();
+  function gmul(a, b) { return (a === 0 || b === 0) ? 0 : EXP[LOG[a] + LOG[b]]; }
+
+  function rsGenerator(deg) {
+    var g = [1];
+    for (var i = 0; i < deg; i++) {
+      var next = new Array(g.length + 1).fill(0);
+      for (var j = 0; j < g.length; j++) {
+        next[j] ^= g[j];                      // × x
+        next[j + 1] ^= gmul(g[j], EXP[i]);    // × α^i
+      }
+      g = next;
+    }
+    return g;
+  }
+  function rsRemainder(data, ecLen) {
+    var g = rsGenerator(ecLen), rem = new Array(ecLen).fill(0);
+    for (var i = 0; i < data.length; i++) {
+      var f = data[i] ^ rem[0];
+      rem.shift(); rem.push(0);
+      for (var j = 0; j < ecLen; j++) rem[j] ^= gmul(g[j + 1], f);
+    }
+    return rem;
+  }
+  function bchRemainder(v, gen) {
+    var gl = bitLen(gen);
+    while (bitLen(v) - gl >= 0) v ^= gen << (bitLen(v) - gl);
+    return v;
+  }
+  function bitLen(v) { var n = 0; while (v) { n++; v >>>= 1; } return n; }
+
+  function utf8(str) {
+    var out = [];
+    for (var i = 0; i < str.length; i++) {
+      var c = str.codePointAt(i);
+      if (c > 0xFFFF) i++;
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) out.push(0xC0 | c >> 6, 0x80 | c & 63);
+      else if (c < 0x10000) out.push(0xE0 | c >> 12, 0x80 | (c >> 6) & 63, 0x80 | c & 63);
+      else out.push(0xF0 | c >> 18, 0x80 | (c >> 12) & 63, 0x80 | (c >> 6) & 63, 0x80 | c & 63);
+    }
+    return out;
+  }
+
+  function dataCodewords(ver) {
+    var s = SPEC[ver];
+    return s[1] * s[2] + (s.length > 3 ? s[3] * s[4] : 0);
+  }
+  function byteCapacity(ver) {
+    return dataCodewords(ver) - (ver < 10 ? 2 : 3);  // 4-bit mode + length field
+  }
+
+  // ---- bit/byte assembly ------------------------------------------------
+  function buildCodewords(text) {
+    var bytes = utf8(text), ver = 1;
+    while (ver < SPEC.length && byteCapacity(ver) < bytes.length) ver++;
+    if (ver >= SPEC.length) throw new Error("QR: text too long for versions 1-10");
+
+    var bits = [], i;
+    emit(bits, 0x4, 4);                                   // 0100 = byte mode
+    emit(bits, bytes.length, ver < 10 ? 8 : 16);
+    for (i = 0; i < bytes.length; i++) emit(bits, bytes[i], 8);
+    var capBits = dataCodewords(ver) * 8;
+    emit(bits, 0, Math.min(4, capBits - bits.length));     // terminator
+    while (bits.length % 8) bits.push(0);
+    var pad = [0xEC, 0x11];
+    for (i = 0; bits.length + 8 <= capBits; i++) emit(bits, pad[i % 2], 8);
+
+    var cw = new Array(bits.length / 8);
+    for (i = 0; i < cw.length; i++) {
+      var b = 0;
+      for (var j = 0; j < 8; j++) b = (b << 1) | bits[i * 8 + j];
+      cw[i] = b;
+    }
+
+    // split into RS blocks, then interleave data and EC codewords
+    var s = SPEC[ver], ecLen = s[0], blocks = [], k = 0;
+    var groups = s.length > 3 ? [[s[1], s[2]], [s[3], s[4]]] : [[s[1], s[2]]];
+    groups.forEach(function (grp) {
+      for (var b = 0; b < grp[0]; b++) { blocks.push(cw.slice(k, k + grp[1])); k += grp[1]; }
+    });
+    var ec = blocks.map(function (blk) { return rsRemainder(blk, ecLen); });
+
+    var out = [], maxData = Math.max.apply(null, blocks.map(function (b) { return b.length; }));
+    for (i = 0; i < maxData; i++)
+      for (var bi = 0; bi < blocks.length; bi++)
+        if (i < blocks[bi].length) out.push(blocks[bi][i]);
+    for (i = 0; i < ecLen; i++)
+      for (var ej = 0; ej < ec.length; ej++) out.push(ec[ej][i]);
+    return { version: ver, codewords: out };
+  }
+  function emit(bits, value, len) {
+    for (var i = len - 1; i >= 0; i--) bits.push((value >> i) & 1);
+  }
+
+  // ---- matrix -----------------------------------------------------------
+  function Matrix(ver) {
+    this.ver = ver;
+    this.size = ver * 4 + 17;
+    this.dark = [];
+    this.fixed = [];
+    for (var i = 0; i < this.size; i++) {
+      this.dark.push(new Array(this.size).fill(false));
+      this.fixed.push(new Array(this.size).fill(false));
+    }
+  }
+  Matrix.prototype.set = function (r, c, dark) {
+    if (r < 0 || c < 0 || r >= this.size || c >= this.size) return;
+    this.dark[r][c] = !!dark;
+    this.fixed[r][c] = true;
+  };
+  Matrix.prototype.reserveFinders = function () {
+    var S = this.size;
+    [[0, 0], [S - 7, 0], [0, S - 7]].forEach(function (p) {
+      for (var r = -1; r < 8; r++) for (var c = -1; c < 8; c++) {
+        var dr = Math.max(Math.abs(r - 3), Math.abs(c - 3));   // ring distance
+        this.set(p[0] + r, p[1] + c, dr !== 2 && dr !== 4);    // separators (dr===4) stay light
+      }
+    }, this);
+  };
+  Matrix.prototype.reserveTiming = function () {
+    for (var i = 8; i < this.size - 8; i++) {
+      this.set(6, i, i % 2 === 0);
+      this.set(i, 6, i % 2 === 0);
+    }
+  };
+  Matrix.prototype.reserveAlign = function () {
+    var pos = ALIGN[this.ver], last = this.size - 7, self = this;
+    pos.forEach(function (r) {
+      pos.forEach(function (c) {
+        if ((r === 6 && c === 6) || (r === 6 && c === last) || (r === last && c === 6)) return;
+        for (var dr = -2; dr <= 2; dr++) for (var dc = -2; dc <= 2; dc++) {
+          var d = Math.max(Math.abs(dr), Math.abs(dc));
+          self.set(r + dr, c + dc, d !== 1);
+        }
+      });
+    });
+  };
+  Matrix.prototype.reserveFormat = function (mask) {
+    var data = (EC_M_BITS << 5) | mask;
+    var bits = ((data << 10) | bchRemainder(data << 10, G15)) ^ G15_MASK;
+    var S = this.size;
+    for (var i = 0; i < 15; i++) {
+      var on = ((bits >> i) & 1) === 1;
+      if (i < 6) this.set(i, 8, on);
+      else if (i < 8) this.set(i + 1, 8, on);
+      else this.set(S - 15 + i, 8, on);
+      if (i < 8) this.set(8, S - 1 - i, on);
+      else if (i < 9) this.set(8, 7, on);
+      else this.set(8, 14 - i, on);
+    }
+    this.set(S - 8, 8, true);           // the always-dark module
+  };
+  Matrix.prototype.reserveVersion = function () {
+    if (this.ver < 7) return;
+    var bits = (this.ver << 12) | bchRemainder(this.ver << 12, G18), S = this.size;
+    for (var i = 0; i < 18; i++) {
+      var on = ((bits >> i) & 1) === 1;
+      this.set(Math.floor(i / 3), S - 11 + (i % 3), on);
+      this.set(S - 11 + (i % 3), Math.floor(i / 3), on);
+    }
+  };
+  var MASKS = [
+    function (r, c) { return (r + c) % 2 === 0; },
+    function (r) { return r % 2 === 0; },
+    function (r, c) { return c % 3 === 0; },
+    function (r, c) { return (r + c) % 3 === 0; },
+    function (r, c) { return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0; },
+    function (r, c) { return ((r * c) % 2) + ((r * c) % 3) === 0; },
+    function (r, c) { return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0; },
+    function (r, c) { return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0; }
+  ];
+  Matrix.prototype.placeData = function (codewords, mask) {
+    var S = this.size, row = S - 1, dir = -1, bit = 7, idx = 0;
+    for (var col = S - 1; col > 0; col -= 2) {
+      if (col === 6) col--;
+      for (;;) {
+        for (var k = 0; k < 2; k++) {
+          var c = col - k;
+          if (this.fixed[row][c]) continue;
+          var dark = false;
+          if (idx < codewords.length) dark = ((codewords[idx] >>> bit) & 1) === 1;
+          if (MASKS[mask](row, c)) dark = !dark;
+          this.dark[row][c] = dark;
+          if (--bit < 0) { bit = 7; idx++; }
+        }
+        row += dir;
+        if (row < 0 || row >= S) { row -= dir; dir = -dir; break; }
+      }
+    }
+  };
+  Matrix.prototype.penalty = function () {
+    var S = this.size, m = this.dark, score = 0, r, c;
+
+    function linePenalty(get, n) {                     // rule 1 + rule 3
+      var p = 0, cnt = 1, seq = [], i;
+      for (i = 0; i < n; i++) seq.push(get(i));
+      for (i = 1; i <= n; i++) {
+        if (i < n && seq[i] === seq[i - 1]) cnt++;
+        else { if (cnt >= 5) p += 3 + (cnt - 5); cnt = 1; }
+      }
+      var s = seq.map(function (v) { return v ? "1" : "0"; }).join("");
+      ["10111010000", "00001011101"].forEach(function (pat) {
+        var at = 0;
+        while ((at = s.indexOf(pat, at)) !== -1) { p += 40; at += 1; }
+      });
+      return p;
+    }
+    for (r = 0; r < S; r++) score += linePenalty(function (i) { return m[r][i]; }, S);
+    for (c = 0; c < S; c++) score += linePenalty(function (i) { return m[i][c]; }, S);
+
+    for (r = 0; r < S - 1; r++)                        // rule 2
+      for (c = 0; c < S - 1; c++) {
+        var v = m[r][c];
+        if (v === m[r][c + 1] && v === m[r + 1][c] && v === m[r + 1][c + 1]) score += 3;
+      }
+
+    var dark = 0;                                      // rule 4
+    for (r = 0; r < S; r++) for (c = 0; c < S; c++) if (m[r][c]) dark++;
+    var total = S * S;
+    score += Math.floor(Math.abs((dark * 100) / total - 50) / 5) * 10;
+    return score;
+  };
+
+  /** Returns {version, size, mask, modules: boolean[][]} — true = dark module. */
+  function encode(text) {
+    var body = buildCodewords(text);
+    var best = null;
+    for (var mask = 0; mask < 8; mask++) {
+      var mx = new Matrix(body.version);
+      mx.reserveFinders();
+      mx.reserveTiming();
+      mx.reserveAlign();
+      mx.reserveFormat(mask);
+      mx.reserveVersion();
+      mx.placeData(body.codewords, mask);
+      var p = mx.penalty();
+      if (!best || p < best.penalty) best = { penalty: p, mask: mask, modules: mx.dark };
+    }
+    return { version: body.version, size: best.modules.length, mask: best.mask, modules: best.modules };
+  }
+
+  /** Paints a QR onto a canvas element with the usual 4-module quiet zone. */
+  function draw(canvas, qr, pxPerModule) {
+    var q = 4, n = qr.size + q * 2, scale = pxPerModule || Math.max(2, Math.floor(260 / n));
+    canvas.width = n * scale;
+    canvas.height = n * scale;
+    var ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#000000";
+    for (var r = 0; r < qr.size; r++) for (var c = 0; c < qr.size; c++) {
+      if (qr.modules[r][c]) ctx.fillRect((c + q) * scale, (r + q) * scale, scale, scale);
+    }
+    return scale;
+  }
+
+  return { encode: encode, draw: draw, _internal: { byteCapacity: byteCapacity, rsGenerator: rsGenerator } };
+})();
+</script>
+
+<!-- ==================================================================
+     App: camera loop, photo fallback, rendering, QR wiring.
+     ================================================================== -->
+<script>
+"use strict";
+
+/* The canonical public URL of this page — also what the QR code encodes. */
+var PAGE_URL = "https://vasutova.github.io/mlr-ex08/";
+
+var $ = function (id) { return document.getElementById(id); };
+var video = $("video"), photoEl = $("photo"), statusEl = $("status"), hintEl = $("hint");
+var session = null, stream = null, facing = "environment", looping = false, busy = false;
+var runCount = 0, msTotal = 0;   // NB: never name a global `frames` — window.frames is read-only
+
+function setStatus(msg, isError) {
+  statusEl.textContent = msg || "";
+  statusEl.className = "status" + (isError ? " error" : "");
+}
+function setHint(msg) { hintEl.textContent = msg || ""; }
+
+/* ---------- model ---------- */
+async function loadModel() {
+  if (typeof ort === "undefined") throw new Error("ONNX Runtime Web did not load (CDN blocked?)");
+  ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/";
+  // GitHub Pages sends no COOP/COEP headers, so SharedArrayBuffer is unavailable:
+  // pin the WASM runtime to a single thread (also the safest choice on iOS Safari).
+  ort.env.wasm.numThreads = 1;
+  ort.env.wasm.proxy = false;
+  try { ort.env.wasm.initializationTimeout = 120; } catch (e) {}
+  session = await ort.InferenceSession.create(CFG.model, { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+}
+
+async function runModel(tensorData) {
+  var tensor = new ort.Tensor("float32", tensorData, [1, 3, CFG.size, CFG.size]);
+  var feeds = {};
+  feeds[CFG.inputName] = tensor;
+  var results = await session.run(feeds);
+  var out = results[session.outputNames[0]];
+  return softmax(Array.prototype.slice.call(out.data));
+}
+
+/* ---------- results UI ---------- */
+var barEls = {};
+(function buildBars() {
+  var ul = $("bars");
+  CFG.classes.forEach(function (cls) {
+    var li = document.createElement("li");
+    var label = document.createElement("span"); label.className = "label"; label.textContent = cls;
+    var track = document.createElement("div"); track.className = "track";
+    var fill = document.createElement("div"); fill.className = "fill"; track.appendChild(fill);
+    var pct = document.createElement("span"); pct.className = "pct"; pct.textContent = "—";
+    li.appendChild(label); li.appendChild(track); li.appendChild(pct);
+    ul.appendChild(li);
+    barEls[cls] = { fill: fill, pct: pct };
+  });
+})();
+
+function fmtProb(p) {
+  if (p >= 0.01) return (p * 100).toFixed(1) + "%";
+  if (p >= 0.0001) return (p * 100).toFixed(3) + "%";
+  if (p === 0) return "0%";
+  return p.toExponential(1);
+}
+function render(probs, ms) {
+  var order = CFG.classes.map(function (c, i) { return [c, probs[i]]; })
+    .sort(function (a, b) { return b[1] - a[1]; });
+  CFG.classes.forEach(function (c, i) {
+    barEls[c].fill.style.width = Math.max(0.4, probs[i] * 100) + "%";
+    barEls[c].pct.textContent = fmtProb(probs[i]);
+  });
+  $("topName").textContent = order[0][0];
+  $("topVal").textContent = fmtProb(order[0][1]);
+  if (ms != null) {
+    runCount++; msTotal += ms;
+    $("perf").textContent = "inference " + ms.toFixed(0) + " ms · avg " +
+      (msTotal / runCount).toFixed(0) + " ms over " + runCount + " run" + (runCount === 1 ? "" : "s") +
+      " · every class shown, highest first";
+  }
+}
+
+/* ---------- live camera ---------- */
+async function startCamera() {
+  if (!window.isSecureContext) { setStatus("The camera needs HTTPS — open the https:// address or use the photo upload.", true); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus("This browser has no camera API. Use the photo upload below.", true);
+    return;
+  }
+  stopCamera();
+  setStatus("Requesting camera…");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+  } catch (err) {
+    try { stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
+    catch (err2) {
+      setStatus("Camera unavailable (" + (err && err.name || "error") + ": " +
+        (err && err.message || "") + "). The photo upload works without a camera.", true);
+      return;
+    }
+  }
+  photoEl.hidden = true;
+  video.hidden = false;
+  video.srcObject = stream;
+  try { await video.play(); } catch (e) { /* some browsers need a second tap — the Start button doubles as play */ }
+  $("startBtn").hidden = true;
+  $("stopBtn").hidden = false;
+  $("flipBtn").hidden = false;
+  setStatus("Live — holding your leaf inside the square works best.");
+  setHint("");
+  looping = true;
+  requestAnimationFrame(tick);
+}
+
+function stopCamera() {
+  looping = false;
+  if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+  video.pause();
+  video.srcObject = null;
+  $("startBtn").hidden = false;
+  $("stopBtn").hidden = true;
+  $("flipBtn").hidden = true;
+}
+
+function tick() {
+  if (!looping) return;
+  if (!busy && session && video.videoWidth > 0 && video.readyState >= 2) {
+    busy = true;
+    var t0 = performance.now();
+    runModel(toTensor(video, video.videoWidth, video.videoHeight))
+      .then(function (probs) { render(probs, performance.now() - t0); })
+      .catch(function (e) { stopCamera(); setStatus("Inference failed: " + e.message, true); })
+      .then(function () { busy = false; });
+  }
+  setTimeout(function () { requestAnimationFrame(tick); }, 60);
+}
+
+/* ---------- photo fallback ---------- */
+var previewURL = null;
+
+async function decodeFile(file) {
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(file); } catch (e) { /* fall through to <img> */ }
+  }
+  var url = URL.createObjectURL(file);
+  try {
+    var img = new Image();
+    img.src = url;
+    await (img.decode ? img.decode() : new Promise(function (res, rej) {
+      img.onload = res; img.onerror = rej;
+    }));
+    return img;
+  } finally { setTimeout(function () { URL.revokeObjectURL(url); }, 30000); }
+}
+
+async function handleFile(file) {
+  if (!session) { setStatus("Still loading the model — one moment.", true); return; }
+  stopCamera();
+  setStatus("Reading " + file.name + "…");
+  try {
+    var src = await decodeFile(file);
+    var w = src.width, h = src.height;
+    photoEl.hidden = false;
+    video.hidden = true;
+    if (src instanceof Image) photoEl.src = src.src;
+    else {
+      if (previewURL) URL.revokeObjectURL(previewURL);
+      previewURL = URL.createObjectURL(file);
+      photoEl.src = previewURL;
+    }
+    var t0 = performance.now();
+    render(await runModel(toTensor(src, w, h)), performance.now() - t0);
+    setStatus(file.name + " · " + w + "×" + h + " px, centre " + Math.min(w, h) + "×" + Math.min(w, h) + " square classified.");
+    setHint("the centre square of the photo is what gets classified");
+  } catch (e) {
+    setStatus("Could not read that image (" + e.message + "). Try a JPEG or PNG.", true);
+  }
+}
+
+/* ---------- built-in check against check_expected.json ---------- */
+async function runCheck() {
+  if (!session) { $("checkResult").innerHTML = '<span class="bad">model not loaded yet</span>'; return; }
+  $("checkResult").textContent = "running…";
+  try {
+    var blob = await (await fetch("check_image.jpg")).blob();
+    var src = await decodeFile(blob);
+    var probs = await runModel(toTensor(src, src.width, src.height));
+    var expected = await (await fetch("check_expected.json")).json();
+    var worst = 0, lines = [];
+    CFG.classes.forEach(function (c, i) {
+      var d = Math.abs(probs[i] - expected[c]);
+      worst = Math.max(worst, d);
+      lines.push(c + " " + probs[i].toFixed(6) + " (expected " + expected[c].toFixed(6) + ")");
+    });
+    var pass = worst < 1e-3;
+    $("checkResult").innerHTML = (pass ? '<span class="ok">PASS</span> ' : '<span class="bad">FAIL</span> ') +
+      "largest deviation " + worst.toExponential(2) + " — " + lines.join(" · ");
+    return { pass: pass, worst: worst };
+  } catch (e) {
+    $("checkResult").innerHTML = '<span class="bad">check error: ' + e.message + "</span>";
+    return { pass: false, worst: null };
+  }
+}
+
+/* ---------- QR ---------- */
+function renderQR() {
+  var link = $("qrLink");
+  link.href = PAGE_URL;
+  link.textContent = PAGE_URL;
+  try {
+    var qr = QRCode.encode(PAGE_URL);
+    QRCode.draw($("qr"), qr);
+    var here = location.origin ? location.origin + location.pathname : null;
+    var same = here && (PAGE_URL === here || PAGE_URL === here.replace(/\/$/, "") + "/");
+    $("qrMatch").innerHTML = !here
+      ? "QR encodes <code>" + PAGE_URL + "</code>"
+      : (same
+          ? '<span class="ok">✓ Encoded URL matches this page.</span>'
+          : 'QR encodes <code>' + PAGE_URL + '</code> — you are viewing <code>' + here + '</code>, so this copy is not the deployed page.');
+  } catch (e) {
+    $("qrMatch").textContent = "QR could not be drawn: " + e.message;
+  }
+}
+
+/* ---------- wire up ---------- */
+$("startBtn").addEventListener("click", startCamera);
+$("stopBtn").addEventListener("click", function () { stopCamera(); setStatus("Camera stopped."); });
+$("flipBtn").addEventListener("click", function () { facing = facing === "environment" ? "user" : "environment"; startCamera(); });
+$("file").addEventListener("change", function (e) { if (e.target.files[0]) handleFile(e.target.files[0]); });
+$("checkBtn").addEventListener("click", runCheck);
+
+renderQR();
+loadModel()
+  .then(function () {
+    setStatus("Model ready (" + CFG.classes.length + " classes, " + CFG.size + "×" + CFG.size +
+      " input). Press Start camera, or upload a photo.");
+    // ?autotest runs the built-in check on load and publishes the outcome in
+    // <meta name="leaf-autotest"> — handy for CI and for checking a deployment.
+    if (/[?&]autotest/.test(location.search)) runCheck().then(function (r) {
+      document.head.querySelector('meta[name="leaf-autotest"]').content = JSON.stringify(r);
+    });
+  })
+  .catch(function (e) { setStatus("Could not load the model: " + e.message, true); });
+</script>
+</body>
+</html>
