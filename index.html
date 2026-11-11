@@ -155,7 +155,7 @@
       <!-- playsinline is mandatory for iOS Safari: without it the video jumps into a fullscreen player -->
       <video id="video" playsinline muted autoplay></video>
       <img id="photo" alt="Preview of the photo you selected" hidden>
-      <p class="hint" id="hint"></p>
+      <p class="hint" id="hint">camera off · press Start camera, or upload a photo</p>
     </div>
     <div class="row">
       <button id="startBtn">▶ Start camera</button>
@@ -709,6 +709,7 @@ function stopCamera() {
   $("startBtn").hidden = false;
   $("stopBtn").hidden = true;
   $("flipBtn").hidden = true;
+  setHint("camera off · press Start camera, or upload a photo");
 }
 
 function tick() {
