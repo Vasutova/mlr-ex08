@@ -733,10 +733,10 @@ async function decodeFile(file) {
 }
 
 async function handleFile(file) {
-  if (!session) { setStatus("Still loading the model — one moment.", true); return; }
   stopCamera();
   setStatus("Reading " + file.name + "…");
   try {
+    await modelReady;
     var src = await decodeFile(file);
     var w = src.width, h = src.height;
     photoEl.hidden = false;
@@ -758,9 +758,9 @@ async function handleFile(file) {
 
 /* ---------- built-in check against check_expected.json ---------- */
 async function runCheck() {
-  if (!session) { $("checkResult").innerHTML = '<span class="bad">model not loaded yet</span>'; return; }
   $("checkResult").textContent = "running…";
   try {
+    await modelReady;
     var blob = await (await fetch("check_image.jpg")).blob();
     var src = await decodeFile(blob);
     var probs = await runModel(toTensor(src, src.width, src.height));
@@ -809,7 +809,10 @@ $("file").addEventListener("change", function (e) { if (e.target.files[0]) handl
 $("checkBtn").addEventListener("click", runCheck);
 
 renderQR();
-loadModel()
+// Kept as a promise so an upload or a check pressed before the model is ready
+// simply waits for it instead of failing.
+var modelReady = loadModel();
+modelReady
   .then(function () {
     setStatus("Model ready (" + CFG.classes.length + " classes, " + CFG.size + "×" + CFG.size +
       " input). Press Start camera, or upload a photo.");
